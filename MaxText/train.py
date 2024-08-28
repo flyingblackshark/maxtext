@@ -54,6 +54,7 @@ import jax.numpy as jnp
 from jax import random
 from jax.sharding import Mesh
 from jax.experimental import checkify
+from jax.experimental.compute_on import compute_on
 
 from cloud_tpu_diagnostics import diagnostic
 from cloud_tpu_diagnostics.configuration import debug_configuration
@@ -69,6 +70,19 @@ Transformer = models.Transformer
 EPS = 1e-8
 _CHUNK_BYTE_SIZE = 2 * 1024 **3
 
+def with_memory_kind(t, memory_kind):
+  return jax.tree_util.tree_map(
+      lambda x: x.with_memory_kind(kind=memory_kind), t
+  )
+
+def cast_dtype_from_to(nest, src, dst):
+  """All items in nest with dtype src are casted to dtype dst."""
+  return jax.tree_util.tree_map(
+      lambda t: t.astype(dst) if t.dtype == src else t, nest
+  )
+
+def cast_to_bf16(params):
+  return cast_dtype_from_to(params, np.float32, jnp.bfloat16)
 
 def validate_train_config(config):
   """Validates the configuration is set correctly for train.py"""
@@ -368,8 +382,8 @@ def train_step(model, config, state, data, dropout_rng):
           "learning/loss": loss,
           "learning/moe_lb_loss": moe_lb_loss,
           "learning/total_weights": total_weights,
-          "learning/grad_norm": max_utils.l2norm_pytree(grads),
-          "learning/raw_grad_norm": max_utils.l2norm_pytree(raw_grads),
+          # "learning/grad_norm": max_utils.l2norm_pytree(grads),
+          # "learning/raw_grad_norm": max_utils.l2norm_pytree(raw_grads),
           "learning/param_norm": max_utils.l2norm_pytree(new_state.params),
       },
       "scalars": {},
@@ -598,7 +612,7 @@ def train_loop(config, state=None):
         out_shardings=out_shard_train,
         static_argnums=static_argnums_train,
         donate_argnums=donate_argnums_train,
-    )
+    ) 
 
     if eval_data_iterator:
       p_eval_step = jax.jit(
@@ -627,6 +641,11 @@ def train_loop(config, state=None):
     if step == first_profiling_step:
       prof.activate()
 
+    # if config.optimizer_host_offload: # just offloading the state
+    #   state_mesh_shardings = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
+    #   params = jax.device_put(state.params, with_memory_kind(state_mesh_shardings.params, 'device'))
+    #   state.replace(params = params)
+
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
       example_batch = load_next_batch(data_iterator, example_batch, config)
       check_example_batch(config, example_batch=example_batch)
@@ -634,6 +653,12 @@ def train_loop(config, state=None):
       record_goodput(recorder, config, step=step)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, example_batch, nextrng)
+
+    if config.optimizer_host_offload: # just offloading the state
+      state_mesh_shardings = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
+      # params = jax.device_put(state.params, with_memory_kind(state_mesh_shardings.params, 'pinned_host'))
+      opt_state = jax.device_put(state.opt_state, with_memory_kind(state_mesh_shardings.opt_state, 'pinned_host'))
+      state.replace(opt_state = opt_state)
 
     new_time = datetime.datetime.now()
     record_scalar_metrics(metrics, new_time - last_step_completion, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
@@ -685,9 +710,11 @@ def train_loop(config, state=None):
 
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+  jax.config.update('jax_enable_memories', True)
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+  os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_enable_host_aware_passes=true"
   pyconfig.initialize(argv)
   max_utils.print_system_information()
   config = pyconfig.config
