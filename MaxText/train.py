@@ -318,7 +318,8 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   return loss, aux
 
 
-def train_step(model, config, state, data, dropout_rng):
+
+def train_step(model, config, mesh, state_mesh_annotations, state, data, dropout_rng):
   """
 
   Args:
@@ -333,6 +334,12 @@ def train_step(model, config, state, data, dropout_rng):
     rng2: A new rng key that can be used in future calls.
 
   """
+  state_mesh_shardings = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
+  if config.optimizer_host_offload:
+    pass
+    # params = jax.device_put(state.params, with_memory_kind(state_mesh_shardings.params, 'device'))
+    # opt_state = jax.device_put(state.opt_state, with_memory_kind(state_mesh_shardings.opt_state, 'pinned_host'))
+    # state = state.replace(opt_state = opt_state)
   if config.gradient_accumulation_steps > 1:
     def accumulate_gradient(acc_grad_and_loss, data):
       grad_func = jax.value_and_grad(loss_fn, argnums=4, has_aux=True)
@@ -376,7 +383,13 @@ def train_step(model, config, state, data, dropout_rng):
     grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
   else:
     grads = raw_grads
-  new_state = state.apply_gradients(grads=grads)
+  if config.optimizer_host_offload:
+    # state_mesh_shardings = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
+    # grads = jax.device_put(grads, with_memory_kind(state_mesh_shardings.params, 'pinned_host'))
+    with compute_on('device_host'):
+      new_state = state.apply_gradients(grads=grads)
+  else:
+    new_state = state.apply_gradients(grads=grads)
   metrics = {
       "scalar": {
           "learning/loss": loss,
@@ -522,9 +535,14 @@ def setup_train_loop(config):
   init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
   data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
 
-  state, state_mesh_annotations, data_iterator = max_utils.setup_training_state(
+  state, state_mesh_annotations, state_mesh_shardings, data_iterator = max_utils.setup_training_state(
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
+
+  # if config.optimizer_host_offload:
+    # params = jax.device_put(state.params, with_memory_kind(state_mesh_shardings.params, 'pinned_host'))
+    # opt_state = jax.device_put(state.opt_state, with_memory_kind(state_mesh_shardings.opt_state, 'pinned_host'))
+    # state = state.replace(params = params, opt_state = opt_state)
 
   if not config.using_pipeline_parallelism:
     # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
@@ -535,6 +553,7 @@ def setup_train_loop(config):
       writer,
       checkpoint_manager,
       state_mesh_annotations,
+      state_mesh_shardings,
       model,
       mesh,
       learning_rate_schedule,
@@ -561,6 +580,7 @@ def train_loop(config, state=None):
       writer,
       checkpoint_manager,
       state_mesh_annotations,
+      state_mesh_shardings,
       model,
       mesh,
       learning_rate_schedule,
@@ -654,11 +674,11 @@ def train_loop(config, state=None):
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, example_batch, nextrng)
 
-    if config.optimizer_host_offload: # just offloading the state
-      state_mesh_shardings = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
-      # params = jax.device_put(state.params, with_memory_kind(state_mesh_shardings.params, 'pinned_host'))
-      opt_state = jax.device_put(state.opt_state, with_memory_kind(state_mesh_shardings.opt_state, 'pinned_host'))
-      state.replace(opt_state = opt_state)
+    # if config.optimizer_host_offload: # just offloading the state
+    #   state_mesh_shardings = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
+    #   # params = jax.device_put(state.params, with_memory_kind(state_mesh_shardings.params, 'pinned_host'))
+    #   opt_state = jax.device_put(state.opt_state, with_memory_kind(state_mesh_shardings.opt_state, 'pinned_host'))
+    #   state.replace(opt_state = opt_state)
 
     new_time = datetime.datetime.now()
     record_scalar_metrics(metrics, new_time - last_step_completion, per_device_tflops, learning_rate_schedule(step), per_device_tokens)

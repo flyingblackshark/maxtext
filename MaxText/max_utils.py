@@ -512,7 +512,7 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
     max_logging.log(
         "No decode checkpoint specified - generating random weights."
     )
-    state, state_mesh_annotations, _ = setup_initial_state(
+    state, state_mesh_annotations, _, _ = setup_initial_state(
       model, None, None, config, rng, mesh, checkpoint_manager, False
       )
   else:
@@ -611,7 +611,7 @@ def setup_initial_state(
         state = state.replace(params=raw_params)
 
   state = unbox_logicallypartioned(state)
-  return state, state_mesh_annotations, data_iterator
+  return state, state_mesh_annotations, state_mesh_shardings, data_iterator
 
 
 # Learning Rate Schedule
