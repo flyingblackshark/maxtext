@@ -417,7 +417,19 @@ def create_goodput_recorder(config):
   return None
 
 
-def record_goodput(recorder, config, step=None, job_start=False, job_end=False):
+def record_goodput(
+      recorder,
+      config,
+      step=None,
+      job_start=False,
+      job_end=False,
+      tpu_init_start=False,
+      tpu_init_end=False,
+      training_prep_start=False,
+      training_prep_end=False,
+      data_loading_start=False,
+      data_loading_end=False,
+  ):
   if recorder and config.enable_goodput_recording:
     if job_start and step is None:
       recorder.record_job_start_time()
@@ -425,6 +437,19 @@ def record_goodput(recorder, config, step=None, job_start=False, job_end=False):
       recorder.record_job_end_time()
     if step is not None:
       recorder.record_step_start_time(step)
+    if tpu_init_start:
+      recorder.record_tpu_init_start_time()
+    if tpu_init_end:
+      recorder.record_tpu_init_end_time()
+    if training_prep_start:
+      recorder.record_training_preparation_start_time()
+    if training_prep_end:
+      recorder.record_training_preparation_end_time()
+    if data_loading_start:
+      recorder.record_data_loading_start_time()
+    if data_loading_end:
+      recorder.record_data_loading_end_time()
+      
 
 def check_example_batch(config, example_batch):
   if config.max_checkify:
@@ -516,10 +541,10 @@ def setup_train_loop(config):
     state: the initialized train state
   """
   recorder = create_goodput_recorder(config)
-  recorder.record_tpu_init_start_time()
+  record_goodput(recorder, config, tpu_init_start=True)
   init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
-  recorder.record_tpu_init_end_time()
-  recorder.record_training_preparation_start_time()
+  record_goodput(recorder, config, tpu_init_end=True)
+  record_goodput(recorder, config, training_prep_start=True)
   data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
 
   state, state_mesh_annotations, data_iterator = max_utils.setup_training_state(
@@ -529,7 +554,7 @@ def setup_train_loop(config):
   if not config.using_pipeline_parallelism:
     # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
     maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, tolerance=0.02)
-  recorder.record_training_preparation_end_time()
+  record_goodput(recorder, config, training_prep_end=True)
   return (
       init_rng,
       writer,
@@ -642,9 +667,9 @@ def train_loop(config, state=None):
       prof.activate()
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
-      recorder.record_data_loading_start_time()
+      record_goodput(recorder, config, data_loading_start=True)
       example_batch = load_next_batch(data_iterator, example_batch, config)
-      recorder.record_data_loading_end_time()
+      record_goodput(recorder, config, data_loading_end=True)
       check_example_batch(config, example_batch=example_batch)
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, step=step)
