@@ -430,6 +430,7 @@ def record_goodput(
       data_loading_start=False,
       data_loading_end=False,
   ):
+  """Record data for Goodput and Badput computation."""
   if recorder and config.enable_goodput_recording:
     if job_start and step is None:
       recorder.record_job_start_time()
@@ -449,7 +450,6 @@ def record_goodput(
       recorder.record_data_loading_start_time()
     if data_loading_end:
       recorder.record_data_loading_end_time()
-      
 
 def check_example_batch(config, example_batch):
   if config.max_checkify:
