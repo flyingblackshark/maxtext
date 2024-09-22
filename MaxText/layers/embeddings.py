@@ -32,8 +32,66 @@ with_logical_partitioning = nn.with_logical_partitioning
 
 _MAX_WAVELENGTH = 10_000
 
-
 class Embed(nn.Module):
+  """A parameterized function from integers [0, n) to d-dimensional vectors.
+
+  Attributes:
+    num_embeddings: number of embeddings.
+    features: number of feature dimensions for each embedding.
+    dtype: the dtype of the embedding vectors (default: float32).
+    embedding_init: embedding initializer.
+  """
+
+  # pylint: disable=attribute-defined-outside-init
+  config: Config
+  num_embeddings: int
+  features: int
+  cast_input_dtype: Optional[DType] = None
+  dtype: DType = jnp.float32
+  attend_dtype: Optional[DType] = None
+  embedding_init: Initializer = default_embed_init
+
+  def setup(self):
+    self.vocab_embedding = self.param(
+        "vocab_embedding",
+        with_logical_partitioning(self.embedding_init, ("vocab", "embed")),
+        (self.num_embeddings, self.features),
+        self.config.weight_dtype,
+    )
+    codebook_dim = 9
+    codebook_size = 1024
+    self.codebook_embedding = self.param(
+        "codebook_embedding",
+        with_logical_partitioning(self.embedding_init, ("vocab", "embed")),
+        (codebook_dim*codebook_size, self.features),
+        self.config.weight_dtype,
+    )
+
+  def __call__(self, inputs: Array) -> Array:
+    """Embeds the inputs along the last dimension.
+
+    Args:
+      inputs: input data, all dimensions are considered batch dimensions.
+
+    Returns:
+      Output which is embedded input data.  The output shape follows the input,
+      with an additional `features` dimension appended.
+    """
+    cfg = self.config
+    if self.cast_input_dtype:
+      inputs = inputs.astype(self.cast_input_dtype)
+    if not jnp.issubdtype(inputs.dtype, jnp.integer):
+      raise ValueError("Input type must be an integer or unsigned integer.")
+
+    if cfg.use_iota_embed:
+      iota = lax.iota(jnp.int32, self.num_embeddings)
+      one_hot = jnp.array(inputs[..., jnp.newaxis] == iota, dtype=self.dtype)
+      output = jnp.dot(one_hot, jnp.asarray(self.embedding, self.dtype))
+    else:
+      output = jnp.asarray(self.vocab_embedding, self.dtype)[inputs]
+    output = nn.with_logical_constraint(output, ("activation_embed_and_logits_batch", "activation_length", "activation_embed"))
+    return output
+class CodebookEmbed(nn.Module):
   """A parameterized function from integers [0, n) to d-dimensional vectors.
 
   Attributes:
