@@ -498,6 +498,8 @@ class CodebookDecoder(nn.Module):
       deterministic=False,
       model_mode=common_types.MODEL_MODE_TRAIN,
   ):
+    codebook_dim = 9
+    codebook_size = 1024
     cfg = self.config
     mesh = self.mesh
     assert decoder_input_tokens.ndim == 3  # [batch, len, codebook_dim]
@@ -508,13 +510,15 @@ class CodebookDecoder(nn.Module):
     codebook_embeddings = self.shared_embedding(codebooks.astype("int32"))
     y = jnp.concatenate([decoder_hidden_states[:,:, jnp.newaxis],codebook_embeddings],axis=2)
     b,s,n,d = y.shape
-    y = jnp.reshape(y,(b*n,s,d))
+    y = jnp.reshape(y,(b*s,n,d))
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
     y = y.astype(cfg.dtype)
+    decoder_positions = jnp.repeat(jnp.expand_dims(jnp.arange(0,codebook_dim,dtype=jnp.int32),0),repeats=b*s,axis=0)
 
-    decoder_positions = jnp.repeat(decoder_positions,n,axis=0)
     if decoder_segment_ids is not None:
-      decoder_segment_ids = jnp.repeat(decoder_segment_ids,n,axis=0)
+      decoder_segment_ids = jnp.reshape(decoder_segment_ids,(b*s))
+      decoder_segment_ids = jnp.expand_dims(decoder_segment_ids,1)
+      decoder_segment_ids = jnp.repeat(decoder_segment_ids,repeats=codebook_dim,axis=1)
     if cfg.use_untrainable_positional_embedding:
       y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
 
@@ -628,8 +632,7 @@ class CodebookDecoder(nn.Module):
         epsilon=cfg.normalization_layer_epsilon,
         kernel_axes=("norm",),
     )(y)
-    codebook_dim = 9
-    codebook_size = 1024
+
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)  
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
     if cfg.logits_via_embedding:
@@ -656,7 +659,7 @@ class CodebookDecoder(nn.Module):
     #logits = logits[:,:,1:-1]
     logits = nn.with_logical_constraint(logits, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab"))
     logits = logits.astype(jnp.float32)
-    return logits,y
+    return logits
 
 class Transformer(nn.Module):
   """An decoder-only Transformer model."""
@@ -719,7 +722,7 @@ class Transformer(nn.Module):
         model_mode=model_mode,
     )
 
-    codebook_logits,_ = self.codebook_decoder(
+    codebook_logits = self.codebook_decoder(
         decoder_input_tokens=decoder_input_tokens,
         decoder_hidden_states=hidden_state,
         decoder_positions=decoder_positions,
