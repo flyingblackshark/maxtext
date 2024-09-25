@@ -140,7 +140,11 @@ def main(config):
             method="decode",
         )
         return recons
+    #pad_frame = 30 * 44100//512
+    n_frames = results.shape[0]
+    results = jnp.pad(results,((0,4096-n_frames),(0,0)))
     audio_output = decode_from_codes(jnp.expand_dims(results.transpose(1,0),0),None).squeeze((0,1))
+    audio_output = audio_output[:n_frames*512]
     sf.write("test.wav",audio_output,samplerate=44100)
 
 def validate_config(config):
