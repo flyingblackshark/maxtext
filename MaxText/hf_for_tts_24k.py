@@ -12,6 +12,7 @@ from jax import numpy as jnp
 import numpy as np
 import dac_jax
 import tensorflow as tf
+import librosa
 from array_record.python.array_record_module import ArrayRecordWriter
 MAX_LENGTH_AUDIO = 40 * 44100   
 MAX_LENGTH_TEXT = 5120
@@ -19,8 +20,9 @@ GLOBAL_BATCH_SIZE = 32
 class HFParseAudioFeatures(grain.MapTransform):
   """Normalize feature keys for HuggingFace input"""
   def map(self, features):
+    audio_44k = librosa.resample(features["audio"]["array"], orig_sr=24000, target_sr=44100)
     return {
-        "audio": np.asarray(features["audio"]["array"], dtype=np.float32),
+        "audio": np.asarray(audio_44k, dtype=np.float32),
         "text": np.asarray(features["text"], dtype=np.int32),
     }   
 
@@ -41,11 +43,11 @@ if __name__ == "__main__":
     device_mesh = mesh_utils.create_device_mesh((4, 1))
     mesh = Mesh(device_mesh, axis_names=("data", "model")) 
     dataset = datasets.load_dataset(
-        "mozilla-foundation/common_voice_17_0",
-        name="en",
-        split="validated",
+        "parler-tts/mls_eng",
+        name="clean",
+        split="train",
         streaming=True,
-        
+
     )
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         "fishaudio/fish-speech-1",
@@ -53,27 +55,11 @@ if __name__ == "__main__":
         add_eos_token=False,
         model_max_length=15000,
         legacy=False,
-    
-    )
-    def prepare_dataset(batch):
-        """Function to preprocess the dataset with the .map method"""
-        transcription = batch["sentence"]
-        
-        if transcription.startswith('"') and transcription.endswith('"'):
-            # we can remove trailing quotation marks as they do not affect the transcription        
-            transcription = transcription[1:-1]
-        
-        if transcription[-1] not in [".", "?", "!"]:
-            # append a full-stop to sentences that do not end in punctuation
-            transcription = transcription + "."
-        
-        batch["sentence"] = transcription
-        
-        return batch
 
-    dataset = dataset.map(prepare_dataset)
+    )
+    
     dataset = dataset.map(
-        lambda examples: tokenizer(examples["sentence"]),
+        lambda examples: tokenizer(examples["text_normalized"]),
         batched=True
     )
     def get_sharding_for_spec(pspec: PartitionSpec) -> NamedSharding:
@@ -135,7 +121,7 @@ if __name__ == "__main__":
             num = i//10240
             if writer is not None:
                 writer.close() 
-            writer = ArrayRecordWriter(f"/home/fbsdev005/bucket/fish_speech_ds/llm/mozilla_common_voice_train_part_{num}.arrayrecord", 'group_size:1')
+            writer = ArrayRecordWriter(f"/home/fbsdev005/bucket/fish_speech_ds/llm2/libritts_train_part_{num}.arrayrecord", 'group_size:1')
         
         #Baatch Length
         semantics, scale = encode_to_codes(jnp.expand_dims(item["audio"],1))
@@ -189,7 +175,7 @@ if __name__ == "__main__":
             tokens = [tokens] + codes
             tokens = np.asarray(tokens)
             labels = tokens.copy()
-            labels[1:, :prompt_length] = -100
+            #labels[1:, :prompt_length] = -100
             tokens = tokens[:, :-1]
             labels = labels[:, 1:]
             i+=1
